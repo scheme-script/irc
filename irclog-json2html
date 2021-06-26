@@ -1,0 +1,97 @@
+#! /usr/bin/env gosh
+
+;;; Format IRC logs in JSON Lines format as HTML.
+
+;; Copyright 2021 Lassi Kortela
+;; SPDX-License-Identifier: MIT
+
+(import (scheme base) (scheme file) (scheme write)
+        (srfi 1) (srfi 13) (srfi 180) (srfi 193))
+
+(cond-expand (gauche (import (sxml serializer))))
+
+(define (group-by f lst)
+  (if (null? lst) '()
+      (let ((first (car lst)))
+        (let loop ((lst (cdr lst)) (key (f first)) (g (list first)) (gs '()))
+          (if (null? lst)
+              (reverse (cons (reverse g) gs))
+              (let ((newkey (f (car lst))))
+                (if (equal? key newkey)
+                    (loop (cdr lst) key
+                          (cons (car lst) g)
+                          gs)
+                    (loop (cdr lst) newkey
+                          (list (car lst))
+                          (cons (reverse g) gs)))))))))
+
+(define (read-irc-messages)
+  (let loop ((messages '()))
+    (let ((message (json-read)))
+      (if (eof-object? message) (reverse messages)
+          (loop (cons message messages))))))
+
+(define (irc-message-tags     m) (vector-ref m 0))
+(define (irc-message-source   m) (vector-ref m 1))
+(define (irc-message-command  m) (vector-ref m 2))
+(define (irc-message-params   m) (vector-copy m 3 (vector-length m)))
+
+(define (split-irc-timestamp m)
+  (let ((s (cdr (assoc 'time (irc-message-tags m)))))
+    (let ((date (substring s 0 (string-length "YYYY-MM-DD")))
+          (time (substring s
+                           (string-length "YYYY-MM-DDT")
+                           (string-length "YYYY-MM-DDTHH:MM"))))
+      (cons date time))))
+
+(define (irc-message-date m) (car (split-irc-timestamp m)))
+(define (irc-message-time m) (cdr (split-irc-timestamp m)))
+
+(define (irc-message->li channel odd? m)
+  (cond ((equal? "PRIVMSG" (irc-message-command m))
+         (let ((target  (vector-ref (irc-message-params m) 0))
+               (message (vector-ref (irc-message-params m) 1)))
+           (unless (equal? target channel) (error "Bad PRIVMSG target"))
+           `(li (@ (class ,(if odd? "m odd" "m")))
+                (span (@ (class "mt")) ,(irc-message-time m))
+                " "
+                (span (@ (class "mnn"))
+                      "<" (span (@ (class "mn")) ,(irc-message-source m)) ">")
+                " "
+                (span (@ (class "mm")) ,message))))
+        (else #f)))
+
+(define (main)
+  (unless (= 1 (length (command-args))) (error "Usage"))
+  (let* ((channel (list-ref (command-args) 0))
+         (messages (read-irc-messages))
+         (title (string-append channel " log"))
+         (sxml `(html
+                 (head
+                  (title ,title)
+                  (link (@ (rel "stylesheet") (href "irc.css"))))
+                 (body
+                  (h1 ,title)
+                  ,@(append-map
+                     (lambda (messages)
+                       (let ((date (irc-message-date (first messages))))
+                         `((h2 ,date)
+                           (ul (@ (class "irc-messages"))
+                               ,@(let loop ((messages messages)
+                                            (odd? #f)
+                                            (li-elems '()))
+                                   (if (null? messages) (reverse li-elems)
+                                       (let ((li (irc-message->li
+                                                  channel odd?
+                                                  (car messages))))
+                                         (if li
+                                             (loop (cdr messages)
+                                                   (not odd?)
+                                                   (cons li li-elems))
+                                             (loop (cdr messages)
+                                                   odd?
+                                                   li-elems)))))))))
+                     (group-by irc-message-date messages))))))
+    (srl:sxml->html sxml (current-output-port))))
+
+(main)
